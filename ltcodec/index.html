@@ -1,0 +1,938 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NSIGII LTF Control Interface</title>
+
+  <!--
+  ============================================================
+  LTF ARTIFACT — NSIGII CONTROL FILE
+  This is NOT a traditional HTML page. It operates as an
+  LTF (Linkable Then Format) artifact:
+    LINK  → metadata block below wires channel config
+    THEN  → JS resolves symbols and activates sparse panels
+    EXEC  → trident pipeline renders live in browser
+  ============================================================
+  -->
+
+  <!-- NSIGII-LTF
+  WIDTH=1280
+  HEIGHT=720
+  MODE=TRIDENT
+  FLASH=UNITE
+  POLARITY=POS
+  OUTPUT=out_from_html.nsigii
+  VERSION=7.0.0
+  CHANNELS=3
+  PRUNE_THRESHOLD=0.5
+  COMPRESS=DEFLATE
+  LOOPBACK_BASE=127.0.0.
+  -->
+
+  <style>
+    /* ── Design tokens ── */
+    :root {
+      --bg:         #080c10;
+      --surface:    #0d1117;
+      --border:     #1e2a38;
+      --accent-ord: #00d4aa;   /* ORDER   — teal  */
+      --accent-con: #f5c400;   /* CONSENSUS — gold */
+      --accent-cha: #e84545;   /* CHAOS   — red   */
+      --text:       #c9d1d9;
+      --muted:      #586069;
+      --font-mono:  'Courier New', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Top bar ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    header .logo { color: var(--accent-ord); font-size: 15px; font-weight: bold; letter-spacing: 2px; }
+    header .ver  { color: var(--muted); font-size: 11px; }
+    header .ltf-badge {
+      margin-left: auto;
+      background: #0d2b22;
+      color: var(--accent-ord);
+      border: 1px solid var(--accent-ord);
+      border-radius: 3px;
+      padding: 2px 8px;
+      font-size: 10px;
+      letter-spacing: 1px;
+    }
+
+    /* ── Layout ── */
+    .shell {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      grid-template-rows: auto 1fr auto;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* ── Left sidebar: LTF meta panel ── */
+    .sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 16px;
+      overflow-y: auto;
+      grid-row: 1 / 4;
+    }
+    .sidebar h3 { color: var(--accent-ord); font-size: 11px; letter-spacing: 1.5px; margin-bottom: 10px; }
+    .kv-row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid #111; }
+    .kv-row .k { color: var(--muted); font-size: 11px; }
+    .kv-row .v { color: var(--text); font-size: 11px; text-align: right; }
+
+    /* ── Main content area ── */
+    .main {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      overflow: hidden;
+    }
+
+    /* ── Trident channel strip ── */
+    .trident-strip {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border-bottom: 1px solid var(--border);
+    }
+    .channel {
+      padding: 14px 16px;
+      border-right: 1px solid var(--border);
+      position: relative;
+      transition: background 0.3s;
+    }
+    .channel:last-child { border-right: none; }
+    .channel .ch-id    { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+    .channel .ch-name  { font-size: 13px; font-weight: bold; margin: 4px 0 2px; }
+    .channel .ch-addr  { font-size: 11px; color: var(--muted); }
+    .channel .ch-rwx   { font-size: 11px; margin-top: 6px; }
+    .channel .ch-state {
+      position: absolute; top: 12px; right: 12px;
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--muted);
+      box-shadow: 0 0 6px transparent;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .channel.order  { background: #0a1f18; }
+    .channel.order .ch-name  { color: var(--accent-ord); }
+    .channel.order .ch-state { background: var(--accent-ord); box-shadow: 0 0 8px var(--accent-ord); }
+    .channel.chaos  { background: #1f0a0a; }
+    .channel.chaos .ch-name  { color: var(--accent-cha); }
+    .channel.chaos .ch-state { background: var(--accent-cha); box-shadow: 0 0 8px var(--accent-cha); }
+    .channel.consensus { background: #1f1800; }
+    .channel.consensus .ch-name  { color: var(--accent-con); }
+    .channel.consensus .ch-state { background: var(--accent-con); box-shadow: 0 0 8px var(--accent-con); }
+
+    /* ── Pipeline area ── */
+    .pipeline-area {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      gap: 0;
+      overflow: hidden;
+    }
+    .panel {
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: auto;
+      /* SPARSE: panels start hidden, activated by JS */
+      opacity: 0.3;
+      transition: opacity 0.4s;
+    }
+    .panel.active { opacity: 1; }
+    .panel:last-child { border-right: none; }
+    .panel h4 { font-size: 10px; color: var(--muted); letter-spacing: 1.5px; margin-bottom: 4px; }
+
+    /* ── Discriminant flash display ── */
+    .discriminant {
+      display: flex; align-items: center; gap: 10px;
+      background: #0a0a12; border: 1px solid var(--border);
+      border-radius: 4px; padding: 8px 12px;
+    }
+    .discriminant .eq  { color: var(--muted); font-size: 11px; flex: 1; }
+    .discriminant .val { font-size: 15px; font-weight: bold; }
+    .discriminant.order .val     { color: var(--accent-ord); }
+    .discriminant.consensus .val { color: var(--accent-con); }
+    .discriminant.chaos .val     { color: var(--accent-cha); }
+
+    /* ── Zip / compression panel ── */
+    .compress-panel { gap: 10px; }
+    .meter-row { display: flex; align-items: center; gap: 8px; }
+    .meter-row label { font-size: 11px; color: var(--muted); width: 90px; flex-shrink: 0; }
+    .meter-bar { flex: 1; height: 8px; background: #1a2030; border-radius: 4px; overflow: hidden; }
+    .meter-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+    .meter-fill.ord { background: var(--accent-ord); }
+    .meter-fill.cha { background: var(--accent-cha); }
+    .meter-fill.zip { background: #6e5bcc; }
+    .meter-row .pct { font-size: 11px; width: 42px; text-align: right; }
+
+    /* ── RB-AVL sparse tree visual ── */
+    .tree-canvas-wrap { flex: 1; position: relative; min-height: 80px; }
+    #rbCanvas { width: 100%; height: 100%; }
+
+    /* ── Enzyme model ── */
+    .enzyme-ops {
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .enzyme-chip {
+      font-size: 10px; padding: 3px 8px; border-radius: 3px;
+      border: 1px solid var(--border); color: var(--muted);
+      transition: all 0.3s;
+    }
+    .enzyme-chip.active-op {
+      border-color: var(--accent-ord);
+      color: var(--accent-ord);
+      background: #0a1f18;
+    }
+    .enzyme-chip.chaos-op {
+      border-color: var(--accent-cha);
+      color: var(--accent-cha);
+      background: #1f0a0a;
+    }
+
+    /* ── Config / control bar ── */
+    .control-bar {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 10px 20px;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .control-bar label { font-size: 11px; color: var(--muted); }
+    .control-bar select, .control-bar input[type=range] {
+      background: #111a24; border: 1px solid var(--border);
+      color: var(--text); font-family: var(--font-mono);
+      font-size: 11px; padding: 3px 6px; border-radius: 3px;
+    }
+    .control-bar input[type=range] { width: 100px; }
+    .btn {
+      background: #0d2b22; color: var(--accent-ord);
+      border: 1px solid var(--accent-ord);
+      border-radius: 3px; padding: 4px 12px;
+      font-family: var(--font-mono); font-size: 11px;
+      cursor: pointer; transition: background 0.2s;
+    }
+    .btn:hover { background: #1a4d38; }
+    .btn.danger { background: #2b0a0a; color: var(--accent-cha); border-color: var(--accent-cha); }
+    .btn.danger:hover { background: #4d1a1a; }
+
+    /* ── Log tail ── */
+    .log-tail {
+      background: #050810; border: 1px solid var(--border);
+      border-radius: 4px; padding: 8px 10px;
+      font-size: 11px; line-height: 1.6;
+      max-height: 90px; overflow-y: auto;
+    }
+    .log-tail .entry { color: var(--muted); }
+    .log-tail .entry.ord { color: var(--accent-ord); }
+    .log-tail .entry.cha { color: var(--accent-cha); }
+    .log-tail .entry.con { color: var(--accent-con); }
+
+    /* ── ZIP test area ── */
+    .zip-test { display: flex; flex-direction: column; gap: 6px; }
+    .zip-test textarea {
+      background: #080c10; border: 1px solid var(--border);
+      color: var(--text); font-family: var(--font-mono);
+      font-size: 11px; resize: none; border-radius: 3px; padding: 6px;
+    }
+    .zip-stats { display: flex; gap: 16px; }
+    .zip-stats span { font-size: 11px; }
+    .zip-stats .lbl { color: var(--muted); }
+    .zip-stats .num { color: var(--accent-ord); }
+
+    /* ── Wheel indicator ── */
+    .wheel-wrap { display: flex; align-items: center; gap: 10px; }
+    .wheel-svg { flex-shrink: 0; }
+    .wheel-info { font-size: 11px; }
+    .wheel-info .deg { font-size: 20px; font-weight: bold; color: var(--accent-ord); }
+    .wheel-info .lbl { color: var(--muted); }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+
+<body>
+
+<!-- ═══════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════════ -->
+<header>
+  <span class="logo">NSIGII</span>
+  <span class="ver" id="hdrVer">v7.0.0</span>
+  <span style="color:var(--muted)">Polygatic Video Codec — LTF Control Interface</span>
+  <span class="ltf-badge" id="ltfPhase">LINK</span>
+</header>
+
+<!-- ═══════════════════════════════════════════════
+     SHELL
+═══════════════════════════════════════════════════ -->
+<div class="shell">
+
+  <!-- ── Sidebar: parsed LTF metadata ── -->
+  <aside class="sidebar">
+    <h3>LTF METADATA</h3>
+    <div id="metaKV"></div>
+
+    <h3 style="margin-top:20px">PIPELINE</h3>
+    <div style="font-size:11px;color:var(--muted);line-height:1.8">
+      riftlang.exe<br>
+      → .so.a<br>
+      → rift.exe<br>
+      → gosilang<br>
+      → <span style="color:var(--accent-ord)">nsigii-codec</span>
+    </div>
+
+    <h3 style="margin-top:20px">ORCHESTRATION</h3>
+    <div style="font-size:11px;color:var(--muted);line-height:1.8">
+      nlink → polybuild
+    </div>
+
+    <h3 style="margin-top:20px">LOOPBACK</h3>
+    <div id="loopAddrs" style="font-size:11px;color:var(--muted);line-height:1.8"></div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <div class="main">
+
+    <!-- Trident channels -->
+    <div class="trident-strip" id="tridentStrip">
+      <!-- populated by JS -->
+    </div>
+
+    <!-- Pipeline panels (sparse: activate when data arrives) -->
+    <div class="pipeline-area">
+
+      <!-- Panel 0: Discriminant Flash -->
+      <div class="panel" id="panelFlash">
+        <h4>DISCRIMINANT FLASH VERIFICATION</h4>
+        <div class="discriminant" id="discriminantBox">
+          <span class="eq">Δ = B² − 4AC</span>
+          <span class="val" id="discriminantVal">—</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted)" id="discriminantDetail">
+          Awaiting payload…
+        </div>
+        <div class="wheel-wrap" style="margin-top:4px">
+          <svg class="wheel-svg" width="60" height="60" id="wheelSvg">
+            <circle cx="30" cy="30" r="26" fill="none" stroke="#1e2a38" stroke-width="3"/>
+            <line id="wheelNeedle" x1="30" y1="30" x2="30" y2="6"
+                  stroke="#00d4aa" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="30" cy="30" r="3" fill="#00d4aa"/>
+          </svg>
+          <div class="wheel-info">
+            <div class="deg" id="wheelDeg">0°</div>
+            <div class="lbl">Wheel Position</div>
+            <div id="wheelState" style="font-size:10px;color:var(--muted);margin-top:2px">TRANSMIT</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel 1: ZIP / Compression -->
+      <div class="panel compress-panel" id="panelZip">
+        <h4>STATELESS ZIP COMPRESSION (DEFLATE)</h4>
+        <div class="zip-test">
+          <textarea id="zipInput" rows="3" placeholder="Paste data to compress via browser DEFLATE…">NSIGII LTF sparse model — TRANSMIT→RECEIVE→VERIFY — OBINexus 2026</textarea>
+          <div style="display:flex;gap:8px">
+            <button class="btn" onclick="runZip()">▶ COMPRESS</button>
+            <button class="btn" style="background:#0a1020;color:var(--muted)" onclick="clearZip()">CLEAR</button>
+          </div>
+          <div class="zip-stats">
+            <span><span class="lbl">RAW: </span><span class="num" id="rawBytes">—</span></span>
+            <span><span class="lbl">ZIP: </span><span class="num" id="zipBytes">—</span></span>
+            <span><span class="lbl">RATIO: </span><span class="num" id="zipRatio">—</span></span>
+            <span><span class="lbl">Δ-STATE: </span><span class="num" id="zipState">—</span></span>
+          </div>
+        </div>
+        <div class="meter-row">
+          <label>ORDER frames</label>
+          <div class="meter-bar"><div class="meter-fill ord" id="meterOrd" style="width:0%"></div></div>
+          <span class="pct" id="pctOrd">0%</span>
+        </div>
+        <div class="meter-row">
+          <label>CHAOS frames</label>
+          <div class="meter-bar"><div class="meter-fill cha" id="meterCha" style="width:0%"></div></div>
+          <span class="pct" id="pctCha">0%</span>
+        </div>
+        <div class="meter-row">
+          <label>Compression</label>
+          <div class="meter-bar"><div class="meter-fill zip" id="meterZip" style="width:0%"></div></div>
+          <span class="pct" id="pctZip">0%</span>
+        </div>
+      </div>
+
+      <!-- Panel 2: RB-AVL Sparse Tree -->
+      <div class="panel" id="panelTree">
+        <h4>RB-AVL SPARSE NODE MAP</h4>
+        <div class="tree-canvas-wrap">
+          <canvas id="rbCanvas"></canvas>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">
+          Active nodes (conf ≥ 0.5 = ORDER, pruned = CHAOS)
+        </div>
+      </div>
+
+      <!-- Panel 3: Bipolar Enzyme + Log -->
+      <div class="panel" id="panelEnzyme" style="border-right:none">
+        <h4>BIPOLAR ENZYME MODEL</h4>
+        <div class="enzyme-ops" id="enzymeOps"></div>
+        <div class="log-tail" id="logTail" style="margin-top:8px">
+          <div class="entry">[LTF] Awaiting LINK resolution…</div>
+        </div>
+        <h4 style="margin-top:8px">FLASH BUFFER</h4>
+        <div style="font-size:11px;color:var(--muted)">
+          UNITE: ½ + ½ = 1 &nbsp;|&nbsp; MULTIPLY: ½ × ½ = ¼
+        </div>
+        <div class="meter-row" style="margin-top:4px">
+          <label>Half-1 fill</label>
+          <div class="meter-bar"><div class="meter-fill ord" id="meterH1" style="width:50%"></div></div>
+          <span class="pct">50%</span>
+        </div>
+        <div class="meter-row">
+          <label>Half-2 fill</label>
+          <div class="meter-bar"><div class="meter-fill ord" id="meterH2" style="width:50%"></div></div>
+          <span class="pct">50%</span>
+        </div>
+      </div>
+
+    </div><!-- /pipeline-area -->
+
+    <!-- Control bar -->
+    <div class="control-bar">
+      <label>MODE</label>
+      <select id="ctrlMode" onchange="applyMeta()">
+        <option value="TRIDENT">TRIDENT</option>
+        <option value="MONO">MONO</option>
+        <option value="DUPLEX">DUPLEX</option>
+      </select>
+
+      <label>FLASH</label>
+      <select id="ctrlFlash" onchange="applyMeta()">
+        <option value="UNITE">UNITE</option>
+        <option value="MULTIPLY">MULTIPLY</option>
+      </select>
+
+      <label>POLARITY</label>
+      <select id="ctrlPol" onchange="applyMeta()">
+        <option value="POS">POS (+)</option>
+        <option value="NEG">NEG (−)</option>
+      </select>
+
+      <label>PRUNE θ</label>
+      <input type="range" id="ctrlPrune" min="0" max="100" value="50" oninput="onPruneChange(this)">
+      <span id="pruneVal" style="font-size:11px;color:var(--accent-ord)">0.50</span>
+
+      <label>WIDTH</label>
+      <input type="number" id="ctrlW" value="1280" min="1" style="width:70px;background:#111a24;border:1px solid var(--border);color:var(--text);font-family:var(--font-mono);font-size:11px;padding:3px 6px;border-radius:3px">
+
+      <label>HEIGHT</label>
+      <input type="number" id="ctrlH" value="720" min="1" style="width:70px;background:#111a24;border:1px solid var(--border);color:var(--text);font-family:var(--font-mono);font-size:11px;padding:3px 6px;border-radius:3px">
+
+      <button class="btn" onclick="runCycle()">▶ RUN CYCLE</button>
+      <button class="btn danger" onclick="injectChaos()">⚡ INJECT CHAOS</button>
+
+      <span style="font-size:10px;color:var(--muted);margin-left:auto" id="cycleCount">Cycles: 0</span>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /shell -->
+
+<!-- ═══════════════════════════════════════════════
+     JAVASCRIPT — STATELESS ACTIVE SPARSE ENGINE
+     LINK → THEN → EXECUTE
+═══════════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+// ── PHASE: LINK ──────────────────────────────────
+// Parse <!-- NSIGII-LTF ... --> block from document source
+// Returns {KEY: "VALUE", …}
+function parseLTFMeta() {
+  const src = document.documentElement.outerHTML;
+  const startRe = /<!--\s*NSIGII-LTF\s*([\s\S]*?)-->/i;
+  const m = src.match(startRe);
+  if (!m) return {};
+  const meta = {};
+  m[1].trim().split('\n').forEach(line => {
+    const kv = line.trim().match(/^([A-Z0-9_]+)\s*=\s*(.+)$/);
+    if (kv) meta[kv[1]] = kv[2].trim();
+  });
+  return meta;
+}
+
+// ── STATE (stateless per-session, no localStorage) ──
+const S = {
+  meta:        {},          // LTF metadata from LINK phase
+  channels:    [           // Trident channel states
+    { id: 0, name: 'TRANSMITTER', addr: '127.0.0.1', rwx: 'WRITE',   state: 'order'   },
+    { id: 1, name: 'RECEIVER',    addr: '127.0.0.2', rwx: 'READ',    state: 'order'   },
+    { id: 2, name: 'VERIFIER',    addr: '127.0.0.3', rwx: 'EXECUTE', state: 'order'   },
+  ],
+  discriminant: { a: 1, b: 0, c: -1, delta: 0, state: 'order', wheel: 0 },
+  rbNodes:     [],          // Sparse RB-AVL node list
+  orderCount:  0,
+  chaosCount:  0,
+  cycleCount:  0,
+  zipStats:    { raw: 0, compressed: 0, ratio: 0 },
+  prune:       0.5,
+  enzymes:     ['CREATE','DESTROY','BUILD','BREAK','RENEW','REPAIR'],
+  activeEnzyme: null,
+  chaosMode:   false,
+};
+
+// ── ENZYME OPERATIONS ─────────────────────────────
+const ENZYME_ORDER = ['CREATE','BUILD','RENEW','REPAIR'];
+const ENZYME_CHAOS = ['DESTROY','BREAK','REPAIR'];
+
+// ── DISCRIMINANT ──────────────────────────────────
+function computeDiscriminant(a, b, c) {
+  return b * b - 4 * a * c;
+}
+
+function discriminantState(delta) {
+  if (delta > 0)  return 'order';
+  if (delta === 0) return 'consensus';
+  return 'chaos';
+}
+
+// Map consensus ratio [0,1] → B so Δ = B² - 4
+// consensus=1 → B=4 (Δ=12, ORDER), 0.5 → B=2 (Δ=0, CONSENSUS), 0 → B=0 (Δ=-4, CHAOS)
+function consensusToB(c) { return c * 4.0; }
+
+// Entropy of a byte array → consensus ratio
+function entropyConsensus(bytes) {
+  if (!bytes || bytes.length === 0) return 0.5;
+  let setBits = 0;
+  for (const b of bytes) {
+    let x = b;
+    while (x) { setBits += x & 1; x >>= 1; }
+  }
+  return setBits / (bytes.length * 8);
+}
+
+// ── RB-AVL SPARSE NODE MODEL ─────────────────────
+// Keeps up to 32 active nodes; prunes below threshold
+function rbInsert(key, val, conf, polarity) {
+  const existing = S.rbNodes.find(n => n.key === key);
+  if (existing) {
+    existing.conf = conf; existing.polarity = polarity;
+    rbPrune();
+    return;
+  }
+  S.rbNodes.push({ key, val, conf, polarity, color: 'red' });
+  if (S.rbNodes.length > 32) S.rbNodes.shift(); // cap
+  rbPrune();
+}
+
+function rbPrune() {
+  S.rbNodes.forEach(n => {
+    if (n.conf < S.prune || n.polarity === '-') {
+      n.pruned = true; n.val = 0; n.conf = 0;
+    } else {
+      n.pruned = false;
+    }
+  });
+}
+
+// ── LOG ───────────────────────────────────────────
+function log(msg, cls = '') {
+  const tail = document.getElementById('logTail');
+  const div = document.createElement('div');
+  div.className = 'entry' + (cls ? ' ' + cls : '');
+  div.textContent = '[' + new Date().toISOString().slice(11,19) + '] ' + msg;
+  tail.appendChild(div);
+  if (tail.children.length > 40) tail.removeChild(tail.firstChild);
+  tail.scrollTop = tail.scrollHeight;
+}
+
+// ── RENDER ────────────────────────────────────────
+
+function renderMeta() {
+  const kv = document.getElementById('metaKV');
+  kv.innerHTML = '';
+  Object.entries(S.meta).forEach(([k, v]) => {
+    kv.innerHTML += `<div class="kv-row"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  });
+}
+
+function renderLoopback() {
+  const base = S.meta.LOOPBACK_BASE || '127.0.0.';
+  document.getElementById('loopAddrs').innerHTML =
+    S.channels.map(c => `<span style="color:var(--accent-ord)">${base}${c.id+1}</span> ${c.name}<br>`).join('');
+}
+
+function renderTrident() {
+  const strip = document.getElementById('tridentStrip');
+  strip.innerHTML = '';
+  S.channels.forEach((ch, i) => {
+    const div = document.createElement('div');
+    div.className = `channel ${ch.state}`;
+    div.innerHTML = `
+      <div class="ch-state"></div>
+      <div class="ch-id">CH ${i+1}/3 — ${['1/3','2/3','3/3'][i]}</div>
+      <div class="ch-name">${ch.name}</div>
+      <div class="ch-addr">${(S.meta.LOOPBACK_BASE||'127.0.0.')}${i+1}</div>
+      <div class="ch-rwx">RWX: <strong>${ch.rwx}</strong> &nbsp; STATE: <strong>${ch.state.toUpperCase()}</strong></div>
+    `;
+    strip.appendChild(div);
+  });
+}
+
+function renderDiscriminant() {
+  const d = S.discriminant;
+  const box = document.getElementById('discriminantBox');
+  const val = document.getElementById('discriminantVal');
+  const detail = document.getElementById('discriminantDetail');
+
+  box.className = `discriminant ${d.state}`;
+  val.textContent = d.delta.toFixed(4);
+
+  const labels = { order: 'Δ > 0 — ORDER (two real roots)', consensus: 'Δ = 0 — CONSENSUS (flash point)', chaos: 'Δ < 0 — CHAOS (complex roots, enzyme repair)' };
+  detail.textContent = `A=${d.a.toFixed(2)}  B=${d.b.toFixed(3)}  C=${d.c.toFixed(2)}  |  ${labels[d.state]}`;
+}
+
+function renderWheel() {
+  const deg = S.discriminant.wheel;
+  const rad = (deg - 90) * Math.PI / 180;
+  const nx = 30 + 24 * Math.cos(rad);
+  const ny = 30 + 24 * Math.sin(rad);
+  const needle = document.getElementById('wheelNeedle');
+  needle.setAttribute('x2', nx.toFixed(1));
+  needle.setAttribute('y2', ny.toFixed(1));
+  const colors = { order: '#00d4aa', consensus: '#f5c400', chaos: '#e84545' };
+  needle.setAttribute('stroke', colors[S.discriminant.state] || '#00d4aa');
+  document.getElementById('wheelDeg').textContent = deg + '°';
+  const labels = { 0: 'TRANSMIT', 120: 'RECEIVE', 240: 'VERIFY' };
+  document.getElementById('wheelState').textContent = labels[deg] || deg + '°';
+}
+
+function renderMeters() {
+  const total = S.orderCount + S.chaosCount || 1;
+  const po = ((S.orderCount / total) * 100).toFixed(0);
+  const pc = ((S.chaosCount / total) * 100).toFixed(0);
+  document.getElementById('meterOrd').style.width = po + '%';
+  document.getElementById('meterCha').style.width = pc + '%';
+  document.getElementById('pctOrd').textContent = po + '%';
+  document.getElementById('pctCha').textContent = pc + '%';
+
+  const zr = Math.min(100, S.zipStats.ratio * 100);
+  document.getElementById('meterZip').style.width = zr + '%';
+  document.getElementById('pctZip').textContent = S.zipStats.ratio > 0 ? (S.zipStats.ratio * 100).toFixed(1) + '%' : '—';
+}
+
+function renderEnzyme() {
+  const ops = document.getElementById('enzymeOps');
+  const seq = S.chaosMode ? ENZYME_CHAOS : ENZYME_ORDER;
+  ops.innerHTML = seq.map(op => {
+    const isActive = op === S.activeEnzyme;
+    const cls = isActive ? (S.chaosMode ? 'chaos-op' : 'active-op') : '';
+    return `<div class="enzyme-chip ${cls}">${op}</div>`;
+  }).join('');
+}
+
+function renderRBCanvas() {
+  const canvas = document.getElementById('rbCanvas');
+  const wrap   = canvas.parentElement;
+  canvas.width  = wrap.clientWidth  || 400;
+  canvas.height = wrap.clientHeight || 100;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (S.rbNodes.length === 0) {
+    ctx.fillStyle = '#586069';
+    ctx.font = '11px monospace';
+    ctx.fillText('No nodes — run cycle to populate tree', 12, canvas.height/2);
+    return;
+  }
+
+  const n = S.rbNodes.length;
+  const cw = canvas.width / n;
+  const maxConf = 1.0;
+
+  S.rbNodes.forEach((node, i) => {
+    const x = i * cw;
+    const barH = Math.max(4, (node.conf / maxConf) * (canvas.height - 24));
+    const y = canvas.height - barH - 14;
+
+    // Bar
+    ctx.fillStyle = node.pruned
+      ? '#e84545'
+      : (node.conf >= 0.75 ? '#00d4aa' : '#f5c400');
+    ctx.globalAlpha = node.pruned ? 0.35 : 0.8;
+    ctx.fillRect(x + 2, y, cw - 4, barH);
+    ctx.globalAlpha = 1;
+
+    // Node circle
+    ctx.beginPath();
+    ctx.arc(x + cw/2, y - 4, 4, 0, Math.PI * 2);
+    ctx.fillStyle = node.color === 'red' ? '#e84545' : '#1e2a38';
+    ctx.strokeStyle = '#586069';
+    ctx.lineWidth = 1;
+    ctx.fill();
+    ctx.stroke();
+
+    // Key label
+    ctx.fillStyle = '#586069';
+    ctx.font = '9px monospace';
+    ctx.fillText(node.key.toString(16).toUpperCase(), x + 2, canvas.height - 2);
+  });
+}
+
+function activateSparse() {
+  // Activate panels based on state (sparse activation)
+  document.getElementById('panelFlash').classList.add('active');
+  document.getElementById('panelZip').classList.add('active');
+  if (S.rbNodes.length > 0)    document.getElementById('panelTree').classList.add('active');
+  if (S.cycleCount > 0)        document.getElementById('panelEnzyme').classList.add('active');
+}
+
+function renderAll() {
+  renderTrident();
+  renderDiscriminant();
+  renderWheel();
+  renderMeters();
+  renderEnzyme();
+  renderRBCanvas();
+  activateSparse();
+  document.getElementById('cycleCount').textContent = 'Cycles: ' + S.cycleCount;
+}
+
+// ── CODEC CYCLE SIMULATION ────────────────────────
+// Simulates one TRANSMIT→RECEIVE→VERIFY cycle on random data
+function runCycle() {
+  S.cycleCount++;
+  S.chaosMode = false;
+
+  // Generate synthetic "frame" data (sparse pattern)
+  const frameSize = (parseInt(S.meta.WIDTH)||640) * (parseInt(S.meta.HEIGHT)||360) * 3;
+  // Use a compact approximation — 512 random bytes represent sparse frame statistics
+  const sample = new Uint8Array(512);
+  crypto.getRandomValues(sample);
+
+  // ── CH 0: TRANSMIT ────
+  const polarity = S.meta.POLARITY === 'NEG' ? '-' : '+';
+  const encoded = riftEncode(sample, polarity === '+');
+  S.channels[0].state = 'order';
+  log(`CH0 TRANSMIT: ${sample.length}B → ${encoded.length}B (ROPEN 2→1)`, 'ord');
+
+  // Insert into RB-AVL sparse model
+  encoded.forEach((v, i) => {
+    const conf = Math.random() * 0.5 + 0.5; // bias toward confident
+    rbInsert(i & 0xFF, v, conf, polarity);
+  });
+
+  // ── CH 1: RECEIVE ─────
+  const seqToken = S.cycleCount;
+  S.channels[1].state = seqToken % 2 === 0 ? 'order' : 'chaos';
+  log(`CH1 RECEIVE:  seq=${seqToken} bipartite=${seqToken%2===0?'ORDER':'CHAOS'}`,
+    seqToken % 2 === 0 ? 'ord' : 'cha');
+
+  // ── CH 2: VERIFY ──────
+  const cons = entropyConsensus(encoded);
+  const B    = consensusToB(cons);
+  const delta = computeDiscriminant(1, B, 1);
+  const dState = discriminantState(delta);
+
+  S.discriminant = { a: 1, b: B, c: 1, delta, state: dState, wheel: 0 };
+
+  if (dState === 'order') {
+    S.channels[2].state = 'order';
+    S.discriminant.wheel = 120;
+    S.orderCount++;
+    S.activeEnzyme = 'BUILD';
+    log(`CH2 VERIFY:   Δ=${delta.toFixed(3)} ORDER  ✓ RWX=FULL`, 'ord');
+  } else if (dState === 'consensus') {
+    S.channels[2].state = 'consensus';
+    S.discriminant.wheel = 240;
+    S.orderCount++;
+    S.activeEnzyme = 'RENEW';
+    log(`CH2 VERIFY:   Δ=0 CONSENSUS ✦ flash point`, 'con');
+  } else {
+    S.channels[2].state = 'chaos';
+    S.discriminant.wheel = 0;
+    S.chaosCount++;
+    S.activeEnzyme = 'REPAIR';
+    S.chaosMode = true;
+    log(`CH2 VERIFY:   Δ=${delta.toFixed(3)} CHAOS  ⚠ enzyme REPAIR`, 'cha');
+  }
+
+  document.getElementById('ltfPhase').textContent = 'EXEC';
+  renderAll();
+}
+
+function injectChaos() {
+  // Force chaos: set B=0 → Δ=-4
+  S.discriminant = { a: 1, b: 0, c: 1, delta: -4, state: 'chaos', wheel: 0 };
+  S.channels[2].state = 'chaos';
+  S.chaosCount++;
+  S.chaosMode = true;
+  S.activeEnzyme = 'REPAIR';
+  log('⚡ CHAOS injected — enzyme REPAIR triggered', 'cha');
+  renderAll();
+}
+
+// ── ROPEN SPARSE DUPLEX ENCODE (2→1) ─────────────
+function riftEncode(bytes, polarityA) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 2) {
+    const a = bytes[i];
+    const b = i+1 < bytes.length ? bytes[i+1] : 0x00;
+    const conj = x => (0x0F ^ x) & 0xFF;
+    const logical = polarityA ? (a ^ conj(b)) : (conj(a) ^ b);
+    out.push(logical & 0xFF);
+  }
+  return new Uint8Array(out);
+}
+
+// ── ZIP: STATELESS DEFLATE via CompressionStream ──
+async function runZip() {
+  const input  = document.getElementById('zipInput').value;
+  const raw    = new TextEncoder().encode(input);
+
+  try {
+    // DEFLATE compress using browser-native CompressionStream
+    const cs     = new CompressionStream('deflate-raw');
+    const writer = cs.writable.getWriter();
+    writer.write(raw);
+    writer.close();
+    const chunks = [];
+    const reader = cs.readable.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const compressed = new Uint8Array(chunks.reduce((a,c) => a+c.length, 0));
+    let off = 0; chunks.forEach(c => { compressed.set(c, off); off += c.length; });
+
+    const ratio = 1 - (compressed.length / raw.length);
+    S.zipStats = { raw: raw.length, compressed: compressed.length, ratio: Math.max(0, ratio) };
+
+    document.getElementById('rawBytes').textContent = raw.length + ' B';
+    document.getElementById('zipBytes').textContent = compressed.length + ' B';
+    document.getElementById('zipRatio').textContent = (ratio * 100).toFixed(1) + '%';
+
+    // Map compression ratio to discriminant state
+    const cons   = 1 - ratio;          // high compression = low entropy = ORDER
+    const B      = consensusToB(cons > 1 ? 1 : cons < 0 ? 0 : cons);
+    const delta  = computeDiscriminant(1, B, 1);
+    const dState = discriminantState(delta);
+    const stateLabels = { order: 'ORDER', consensus: 'CONSENSUS', chaos: 'CHAOS' };
+    document.getElementById('zipState').textContent = stateLabels[dState];
+    document.getElementById('zipState').style.color = { order:'var(--accent-ord)', consensus:'var(--accent-con)', chaos:'var(--accent-cha)' }[dState];
+
+    log(`ZIP: ${raw.length}B → ${compressed.length}B (${(ratio*100).toFixed(1)}%) state=${stateLabels[dState]}`,
+      dState === 'chaos' ? 'cha' : dState === 'consensus' ? 'con' : 'ord');
+    renderMeters();
+
+  } catch (e) {
+    log('ZIP failed: ' + e.message, 'cha');
+    document.getElementById('zipState').textContent = 'ERROR';
+  }
+}
+
+function clearZip() {
+  document.getElementById('zipInput').value = '';
+  ['rawBytes','zipBytes','zipRatio','zipState'].forEach(id => {
+    document.getElementById(id).textContent = '—';
+  });
+  S.zipStats = { raw:0, compressed:0, ratio:0 };
+  renderMeters();
+}
+
+// ── CONFIG CONTROLS ───────────────────────────────
+function applyMeta() {
+  S.meta.MODE    = document.getElementById('ctrlMode').value;
+  S.meta.FLASH   = document.getElementById('ctrlFlash').value;
+  S.meta.POLARITY = document.getElementById('ctrlPol').value;
+  S.meta.WIDTH   = document.getElementById('ctrlW').value;
+  S.meta.HEIGHT  = document.getElementById('ctrlH').value;
+  renderMeta();
+  log(`META updated: MODE=${S.meta.MODE} FLASH=${S.meta.FLASH} POL=${S.meta.POLARITY}`);
+}
+
+function onPruneChange(el) {
+  S.prune = el.value / 100;
+  document.getElementById('pruneVal').textContent = S.prune.toFixed(2);
+  S.meta.PRUNE_THRESHOLD = S.prune.toFixed(2);
+  rbPrune();
+  renderRBCanvas();
+  renderMeta();
+}
+
+// ── PHASE: THEN ── symbol resolution ─────────────
+function resolveMeta() {
+  const mode = document.getElementById('ctrlMode');
+  const flash = document.getElementById('ctrlFlash');
+  const pol   = document.getElementById('ctrlPol');
+  const w     = document.getElementById('ctrlW');
+  const h     = document.getElementById('ctrlH');
+
+  if (S.meta.MODE)   [...mode.options].forEach(o => { if (o.value===S.meta.MODE) o.selected=true; });
+  if (S.meta.FLASH)  [...flash.options].forEach(o => { if (o.value===S.meta.FLASH) o.selected=true; });
+  if (S.meta.POLARITY) [...pol.options].forEach(o => { if (o.value===S.meta.POLARITY) o.selected=true; });
+  if (S.meta.WIDTH)  w.value = S.meta.WIDTH;
+  if (S.meta.HEIGHT) h.value = S.meta.HEIGHT;
+  if (S.meta.PRUNE_THRESHOLD) {
+    S.prune = parseFloat(S.meta.PRUNE_THRESHOLD);
+    document.getElementById('ctrlPrune').value = S.prune * 100;
+    document.getElementById('pruneVal').textContent = S.prune.toFixed(2);
+  }
+  document.getElementById('hdrVer').textContent = 'v' + (S.meta.VERSION || '7.0.0');
+}
+
+// ── PHASE: EXECUTE ── bootstrap ──────────────────
+(function bootstrap() {
+  // LINK: parse metadata
+  S.meta = parseLTFMeta();
+  document.getElementById('ltfPhase').textContent = 'THEN';
+
+  renderMeta();
+  renderLoopback();
+
+  // THEN: resolve symbols into controls
+  resolveMeta();
+
+  // Render initial state
+  renderAll();
+
+  // EXECUTE
+  document.getElementById('ltfPhase').textContent = 'EXEC';
+  log('[LTF] LINK resolved — metadata bound — THEN complete', 'ord');
+  log(`[LTF] EXEC: MODE=${S.meta.MODE||'TRIDENT'} POLARITY=${S.meta.POLARITY||'POS'} COMPRESS=${S.meta.COMPRESS||'DEFLATE'}`, 'ord');
+  log('[LTF] Interface live — trident channels initialised');
+
+  // Auto-resize canvas on window resize
+  window.addEventListener('resize', () => {
+    renderRBCanvas();
+  });
+})();
+</script>
+
+</body>
+</html>

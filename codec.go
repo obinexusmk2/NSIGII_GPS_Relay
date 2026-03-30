@@ -12,16 +12,13 @@
 //   EXECUTE  — emit signed, timestamped, location-anchored output
 //
 // The packet cannot be forged: it carries its own proof of origin.
-package codec
+package main
 
 import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/obinexus/ltcodec/pkg/gps"
-	"github.com/obinexus/ltcodec/pkg/spacetime"
 )
 
 // LTFPacket is the fundamental output of the ltcodec system.
@@ -32,7 +29,7 @@ type LTFPacket struct {
 	Version string `json:"version"`  // "1.0.0"
 
 	// Spacetime anchor
-	State spacetime.State `json:"state"`
+	State State `json:"state"`
 
 	// Payload
 	PayloadType string `json:"payload_type"`
@@ -65,20 +62,20 @@ func computePacketHash(stateFingerprint string, payload []byte) string {
 // Codec is the main ltcodec encoder/decoder.
 // It maintains a spacetime session and produces LTFPackets.
 type Codec struct {
-	Session  *spacetime.Session
+	Session  *Session
 	resolver CoordResolver
 }
 
 // CoordResolver is the GPS coordinate source.
 // Can be GPS hardware, IP geolocation, or manual input.
-type CoordResolver func() (gps.Coordinate, error)
+type CoordResolver func() (Coordinate, error)
 
 // NewCodec initialises a new ltcodec instance with the given resolver.
 func NewCodec(resolver CoordResolver) (*Codec, error) {
 	if resolver == nil {
 		// Default: IP-based geolocation
-		resolver = func() (gps.Coordinate, error) {
-			return gps.FromIP()
+		resolver = func() (Coordinate, error) {
+			return FromIP()
 		}
 	}
 
@@ -100,7 +97,7 @@ func (c *Codec) Encode(payloadType string, payload []byte) (LTFPacket, error) {
 	coord, err := c.resolver()
 	if err != nil {
 		// Fallback to zero coordinate rather than failing
-		coord = gps.Coordinate{Source: "unavailable"}
+		coord = Coordinate{Source: "unavailable"}
 	}
 
 	state, err := c.Session.Capture(coord)
