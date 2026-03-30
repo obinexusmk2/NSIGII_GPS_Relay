@@ -62,6 +62,8 @@ func main() {
 		runState(c)
 	case "replay":
 		runReplay(c)
+	case "relay":
+		runRelay(c)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -182,6 +184,28 @@ func runReplay(c *codec.Codec) {
 	log.Fatal("replay: specify -time or -seq")
 }
 
+func runRelay(c *codec.Codec) {
+	fs := flag.NewFlagSet("relay", flag.ExitOnError)
+	intervalSec := fs.Int("interval", 5, "GPS poll interval in seconds")
+	maxStates   := fs.Int("max-states", 0, "rolling window size (0 = unlimited)")
+	verbose     := fs.Bool("verbose", false, "print full state JSON on each tick")
+	output      := fs.String("output", "", "optional JSON log file")
+	fs.Parse(os.Args[2:])
+
+	cfg := RelayConfig{
+		Interval:    time.Duration(*intervalSec) * time.Second,
+		MaxStates:   *maxStates,
+		VerboseMode: *verbose,
+		OutputFile:  *output,
+	}
+
+	fmt.Printf("\n[RELAY] NSIGII GPS Real-Time Relay starting\n")
+	fmt.Printf("[RELAY] Poll interval: %v | Max states: %d\n", cfg.Interval, cfg.MaxStates)
+	fmt.Printf("[RELAY] Press Ctrl+C to stop and print session summary\n\n")
+
+	RunRelay(c, cfg)
+}
+
 func printUsage() {
 	fmt.Println(`
 Usage: ltcodec <command> [flags]
@@ -192,13 +216,22 @@ Commands:
   state                              Print current spacetime state
   replay   -time <RFC3339>           Replay state at given time
            -seq  <n>                 Replay state at sequence n
+  relay    [-interval <sec>]         Start real-time GPS relay loop
+           [-max-states <n>]         Rolling window size (0 = unlimited)
+           [-verbose]                Print full state JSON each tick
+           [-output <file>]          Log relay events to JSON file
 
 Payload types:
   raw      Raw binary data (default)
   legal    Legal document (Care Act, HRA claims)
   nsigii   NSIGII video codec output
 
-Pipeline: riftlang.exe → .so.a → rift.exe → gosilang → ltcodec → nsigii
+Real-time relay (mosaic phase model):
+  Phase 1 (compile-time): canonical GPS anchor captured at session start
+  Phase 2 (runtime):      continuous GPS polling with drift monitoring
+  NSIGII VERIFY fires when Omega drift >= 90° from canonical heading
+
+Pipeline: riftlang.exe → .so.a → rift.exe → gosilang → ltcodec → nsigii → relay
 Orchestration: nlink → polybuild
 `)
 }

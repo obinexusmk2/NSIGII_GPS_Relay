@@ -6,10 +6,11 @@
 package gps
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
-	"encoding/json"
 	"time"
 )
 
@@ -96,4 +97,100 @@ func Manual(lat, lon, alt float64) Coordinate {
 		Timestamp: time.Now().UTC(),
 		Source:    "manual",
 	}
+}
+
+// CoordinateEvent is a single streamed GPS sample, optionally carrying an error.
+type CoordinateEvent struct {
+	Coord Coordinate
+	Err   error
+}
+
+// Watch starts a real-time GPS polling loop at the given interval.
+// Returns a read-only channel of CoordinateEvents.
+// The channel is closed when ctx is cancelled.
+//
+// This is the electric/HERE_AND_NOW layer of the mosaic runtime:
+// the compile-time anchor (canonical coordinate) was set at session start;
+// Watch continuously emits the runtime position so drift can be computed.
+func Watch(ctx context.Context, interval time.Duration) <-chan CoordinateEvent {
+	ch := make(chan CoordinateEvent, 1)
+	go func() {
+		defer close(ch)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				coord, err := FromIP()
+				select {
+				case ch <- CoordinateEvent{Coord: coord, Err: err}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return ch
+}
+
+// GpsDrift computes the mosaic DriftVector components for GPS coordinates.
+// Canonical centre C(t) is the session-start position.
+// Current vector V(t) is the latest polled coordinate.
+//
+// Mapping onto the mosaic DriftCarcass:
+//   R(t)   — Haversine distance from canonical anchor (metres)
+//   Omega  — bearing angle from anchor to current (degrees, 0=N clockwise)
+//   H(t)   — longitudinal (east-west) displacement (decimal degrees)
+//   L(t)   — loyalty: 1.0 at anchor, approaches 0 at MaxDriftMetres
+//
+// Constitutional threshold: if angular deviation from expected bearing
+// exceeds 90° the NSIGII VERIFY interrupt must fire.
+type GpsDrift struct {
+	R     float64 // radial — metres from anchor
+	Omega float64 // angular — bearing degrees (0–360)
+	H     float64 // horizontal — longitude delta (decimal degrees)
+	L     float64 // loyalty — [0,1]
+	Safe  bool    // false when Omega deviation >= 90° from canonical heading
+}
+
+// MaxDriftMetres is the constitutional maximum before loyalty collapses to zero.
+const MaxDriftMetres = 50_000.0 // 50 km
+
+// ComputeGpsDrift maps GPS displacement onto the mosaic DriftCarcass.
+// canonical is the session-start coordinate (compile-time anchor).
+// current is the latest runtime coordinate.
+func ComputeGpsDrift(canonical, current Coordinate) GpsDrift {
+	dist := canonical.DistanceTo(current)
+	bearing := bearingDeg(canonical, current)
+	hDelta := current.Longitude - canonical.Longitude
+	loyalty := math.Max(0.0, 1.0-(dist/MaxDriftMetres))
+
+	// Safety check: deviation from due-north canonical heading >= 90° → unsafe
+	// (mirrors the mosaic 90° Omega threshold for NSIGII VERIFY)
+	deviation := math.Abs(bearing - 0) // deviation from north baseline
+	if deviation > 180 {
+		deviation = 360 - deviation
+	}
+	safe := deviation < 90.0
+
+	return GpsDrift{
+		R:     dist,
+		Omega: bearing,
+		H:     hDelta,
+		L:     loyalty,
+		Safe:  safe,
+	}
+}
+
+// bearingDeg computes the initial bearing (degrees, 0=N, clockwise) from a to b.
+func bearingDeg(a, b Coordinate) float64 {
+	lat1 := a.Latitude * math.Pi / 180
+	lat2 := b.Latitude * math.Pi / 180
+	dLon := (b.Longitude - a.Longitude) * math.Pi / 180
+	y := math.Sin(dLon) * math.Cos(lat2)
+	x := math.Cos(lat1)*math.Sin(lat2) - math.Sin(lat1)*math.Cos(lat2)*math.Cos(dLon)
+	bearing := math.Atan2(y, x) * 180 / math.Pi
+	return math.Mod(bearing+360, 360)
 }
