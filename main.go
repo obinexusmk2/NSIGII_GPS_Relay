@@ -1,237 +1,211 @@
-// ltcodec - Linkable Then Codec
-// OBINexus Computing | github.com/obinexus/ltcodec
+// NSIGII GPS Relay — OBINexus Computing
+// Real-time GPS web server with LTF spacetime fingerprint.
 //
-// Usage:
-//   ltcodec encode -input <file> -type <payload_type>
-//   ltcodec decode -input <file.ltf>
-//   ltcodec state                    # print current spacetime state
-//   ltcodec replay -time <RFC3339>   # replay state at given time
+// Commands:
+//   serve    Start the real-time GPS web server (default port 8080)
+//   state    Print current spacetime state as JSON
+//   relay    Start headless GPS relay with NSIGII drift monitoring
+//
+// Pipeline: riftlang.exe → .so.a → rift.exe → gosilang → nsigii_gps_relay
+// Orchestration: nlink → polybuild
 package main
 
 import (
-	"flag"
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
-
-	"github.com/obinexus/ltcodec/pkg/codec"
-	"github.com/obinexus/ltcodec/pkg/gps"
 )
 
 const banner = `
-╔═══════════════════════════════════════════╗
-║  ltcodec v1.0.0 — OBINexus Computing     ║
-║  Linkable Then Format (LTF) Codec         ║
-║  Pipeline: riftlang → nlink → polybuild  ║
-╚═══════════════════════════════════════════╝
+╔══════════════════════════════════════════════════╗
+║  NSIGII GPS Relay — OBINexus Computing          ║
+║  Real-time spacetime fingerprint relay          ║
+║  Pipeline: riftlang → nlink → polybuild         ║
+╚══════════════════════════════════════════════════╝
 `
 
 func main() {
 	fmt.Print(banner)
 
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+	cmd := "serve"
+	if len(os.Args) >= 2 {
+		cmd = os.Args[1]
 	}
 
-	// Default GPS resolver: try IP geolocation
-	resolver := func() (gps.Coordinate, error) {
-		log.Println("Resolving location via IP geolocation...")
-		coord, err := gps.FromIP()
-		if err != nil {
-			log.Printf("IP geolocation failed: %v — using zero coordinate", err)
-			return gps.Coordinate{Source: "unavailable"}, nil
-		}
-		log.Printf("Location resolved: %.4f, %.4f [%s]",
-			coord.Latitude, coord.Longitude, coord.Source)
-		return coord, nil
-	}
-
-	c, err := codec.NewCodec(resolver)
-	if err != nil {
-		log.Fatalf("Codec init failed: %v", err)
-	}
-
-	switch os.Args[1] {
-	case "encode":
-		runEncode(c)
-	case "decode":
-		runDecode(c)
+	switch cmd {
+	case "serve":
+		runServe()
 	case "state":
-		runState(c)
-	case "replay":
-		runReplay(c)
+		runStateCmd()
 	case "relay":
-		runRelay(c)
+		runRelayCmd()
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
 		printUsage()
 		os.Exit(1)
 	}
 }
 
-func runEncode(c *codec.Codec) {
-	fs := flag.NewFlagSet("encode", flag.ExitOnError)
-	inputFile := fs.String("input", "", "input file to encode")
-	payloadType := fs.String("type", "raw", "payload type (raw, legal, nsigii)")
-	outputFile := fs.String("output", "", "output .ltf file (default: <input>.ltf)")
-	fs.Parse(os.Args[2:])
+// ── serve: HTTP web server ────────────────────────────────────────────────────
 
-	if *inputFile == "" {
-		log.Fatal("encode: -input required")
+func runServe() {
+	port := ":8080"
+	if len(os.Args) >= 3 {
+		port = ":" + os.Args[2]
 	}
 
-	data, err := os.ReadFile(*inputFile)
-	if err != nil {
-		log.Fatalf("encode: read failed: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Phase 1 (magnetic/compile-time): capture canonical GPS anchor
+	log.Println("[NSIGII] Phase 1 — capturing canonical GPS anchor (THERE_AND_THEN)")
+	go runPoller(ctx)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", serveIndex)
+	mux.HandleFunc("/api/location", handleAPILocation)
+	mux.HandleFunc("/api/state", handleAPIState)
+	mux.HandleFunc("/events", handleSSE)
+
+	srv := &http.Server{
+		Addr:         port,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0, // SSE needs no write timeout
 	}
 
-	packet, err := c.Encode(*payloadType, data)
-	if err != nil {
-		log.Fatalf("encode: %v", err)
-	}
+	// Graceful shutdown
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		<-ch
+		log.Println("[NSIGII] Signal received — canonical restore (#NoGhosting)")
+		cancel()
+		srv.Shutdown(context.Background())
+	}()
 
-	out := *outputFile
-	if out == "" {
-		out = *inputFile + ".ltf"
-	}
+	log.Printf("[NSIGII] Phase 2 — electric runtime active (HERE_AND_NOW)")
+	log.Printf("[NSIGII] Web server → http://localhost%s", port)
+	log.Printf("[NSIGII] Open your browser: http://localhost%s", port)
 
-	packetJSON, err := packet.ToJSON()
-	if err != nil {
-		log.Fatalf("encode: serialise failed: %v", err)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("server error: %v", err)
 	}
-
-	if err := os.WriteFile(out, packetJSON, 0644); err != nil {
-		log.Fatalf("encode: write failed: %v", err)
-	}
-
-	fmt.Printf("\n✓ Encoded → %s\n", out)
-	fmt.Printf("  Spacetime fingerprint: %s\n", packet.State.Fingerprint)
-	fmt.Printf("  Packet hash:           %s\n", packet.PacketHash)
-	fmt.Printf("  Sequence:              %d\n", packet.State.Sequence)
-	fmt.Printf("  Location:              %s\n", packet.State.Position.String())
-	fmt.Printf("  Hardware:              %s\n", packet.State.Hardware.MAC)
 }
 
-func runDecode(c *codec.Codec) {
-	fs := flag.NewFlagSet("decode", flag.ExitOnError)
-	inputFile := fs.String("input", "", "input .ltf file")
-	fs.Parse(os.Args[2:])
-
-	if *inputFile == "" {
-		log.Fatal("decode: -input required")
-	}
-
-	// Load from JSON
-	data, err := os.ReadFile(*inputFile)
-	if err != nil {
-		log.Fatalf("decode: read failed: %v", err)
-	}
-
-	// Re-encode with current state to verify
-	fmt.Printf("\n✓ Packet loaded from %s\n", *inputFile)
-	fmt.Printf("  Raw size: %d bytes\n", len(data))
-	fmt.Printf("  Use the state subcommand to inspect the spacetime anchor\n")
+func serveIndex(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "index.html")
 }
 
-func runState(c *codec.Codec) {
-	// Capture a fresh state and display it
-	resolver := func() (gps.Coordinate, error) {
-		return gps.FromIP()
-	}
-
-	coord, _ := resolver()
-	state, err := c.Session.Capture(coord)
-	if err != nil {
-		log.Fatalf("state: %v", err)
-	}
-
-	stateJSON, _ := state.ToJSON()
-	fmt.Printf("\nCurrent spacetime state:\n%s\n", string(stateJSON))
+func handleAPILocation(w http.ResponseWriter, r *http.Request) {
+	loc := currentLocation()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(loc)
 }
 
-func runReplay(c *codec.Codec) {
-	fs := flag.NewFlagSet("replay", flag.ExitOnError)
-	timeStr := fs.String("time", "", "RFC3339 timestamp to replay (e.g. 2026-02-27T07:10:00Z)")
-	seq := fs.Uint64("seq", 0, "sequence number to replay")
-	fs.Parse(os.Args[2:])
+func handleAPIState(w http.ResponseWriter, r *http.Request) {
+	canonical, current := getCanonicalAndCurrent()
+	state := map[string]interface{}{
+		"canonical": canonical,
+		"current":   current,
+		"phase":     "electric_runtime",
+		"pipeline":  "riftlang → nlink → polybuild",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(state)
+}
 
-	if *seq > 0 {
-		state, ok := c.Session.Replay(uint64(*seq))
-		if !ok {
-			log.Fatalf("replay: sequence %d not found", *seq)
-		}
-		stateJSON, _ := state.ToJSON()
-		fmt.Printf("\nReplayed state [seq=%d]:\n%s\n", *seq, string(stateJSON))
+// handleSSE streams location updates via Server-Sent Events.
+// The browser connects once and receives a push on every GPS poll tick.
+func handleSSE(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
 
-	if *timeStr != "" {
-		t, err := time.Parse(time.RFC3339, *timeStr)
-		if err != nil {
-			log.Fatalf("replay: invalid time format: %v", err)
-		}
-		state, ok := c.ReplayAt(t)
-		if !ok {
-			log.Fatal("replay: no states in session yet")
-		}
-		stateJSON, _ := state.ToJSON()
-		fmt.Printf("\nReplayed state [t=%s]:\n%s\n", *timeStr, string(stateJSON))
-		return
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ch := subscribeSSE()
+	defer unsubscribeSSE(ch)
+
+	// Send current location immediately on connect
+	if loc := currentLocation(); loc.Lat != 0 || loc.Lon != 0 {
+		data, _ := json.Marshal(loc)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
 	}
 
-	log.Fatal("replay: specify -time or -seq")
-}
-
-func runRelay(c *codec.Codec) {
-	fs := flag.NewFlagSet("relay", flag.ExitOnError)
-	intervalSec := fs.Int("interval", 5, "GPS poll interval in seconds")
-	maxStates   := fs.Int("max-states", 0, "rolling window size (0 = unlimited)")
-	verbose     := fs.Bool("verbose", false, "print full state JSON on each tick")
-	output      := fs.String("output", "", "optional JSON log file")
-	fs.Parse(os.Args[2:])
-
-	cfg := RelayConfig{
-		Interval:    time.Duration(*intervalSec) * time.Second,
-		MaxStates:   *maxStates,
-		VerboseMode: *verbose,
-		OutputFile:  *output,
+	for {
+		select {
+		case loc, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(loc)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
 	}
-
-	fmt.Printf("\n[RELAY] NSIGII GPS Real-Time Relay starting\n")
-	fmt.Printf("[RELAY] Poll interval: %v | Max states: %d\n", cfg.Interval, cfg.MaxStates)
-	fmt.Printf("[RELAY] Press Ctrl+C to stop and print session summary\n\n")
-
-	RunRelay(c, cfg)
 }
+
+// ── state command ────────────────────────────────────────────────────────────
+
+func runStateCmd() {
+	log.Println("[NSIGII] Fetching current location...")
+	loc, err := fetchFromIP()
+	if err != nil {
+		log.Fatalf("location fetch failed: %v", err)
+	}
+	data, _ := json.MarshalIndent(loc, "", "  ")
+	fmt.Printf("\nCurrent spacetime state:\n%s\n", string(data))
+}
+
+// ── relay command (headless drift monitor) ───────────────────────────────────
+
+func runRelayCmd() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		<-ch
+		log.Println("[RELAY] Signal — canonical restore (#NoGhosting)")
+		cancel()
+	}()
+
+	log.Println("[RELAY] Headless GPS drift relay starting (Ctrl+C to stop)")
+	runDriftRelay(ctx)
+}
+
+// ── usage ────────────────────────────────────────────────────────────────────
 
 func printUsage() {
 	fmt.Println(`
-Usage: ltcodec <command> [flags]
+Usage: nsigii_gps_relay [command] [port]
 
 Commands:
-  encode   -input <file> [-type <type>] [-output <file>]
-  decode   -input <file.ltf>
-  state                              Print current spacetime state
-  replay   -time <RFC3339>           Replay state at given time
-           -seq  <n>                 Replay state at sequence n
-  relay    [-interval <sec>]         Start real-time GPS relay loop
-           [-max-states <n>]         Rolling window size (0 = unlimited)
-           [-verbose]                Print full state JSON each tick
-           [-output <file>]          Log relay events to JSON file
+  serve [port]   Start GPS web server (default port: 8080)
+                 Open http://localhost:8080 to view real-time map
+  state          Print current GPS state as JSON
+  relay          Headless drift relay with NSIGII VERIFY interrupt
 
-Payload types:
-  raw      Raw binary data (default)
-  legal    Legal document (Care Act, HRA claims)
-  nsigii   NSIGII video codec output
-
-Real-time relay (mosaic phase model):
-  Phase 1 (compile-time): canonical GPS anchor captured at session start
-  Phase 2 (runtime):      continuous GPS polling with drift monitoring
-  NSIGII VERIFY fires when Omega drift >= 90° from canonical heading
-
-Pipeline: riftlang.exe → .so.a → rift.exe → gosilang → ltcodec → nsigii → relay
-Orchestration: nlink → polybuild
+Examples:
+  nsigii_gps_relay serve
+  nsigii_gps_relay serve 9090
+  nsigii_gps_relay state
+  nsigii_gps_relay relay
 `)
 }

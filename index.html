@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NSIGII GPS Relay — OBINexus</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Courier New', monospace;
+      background: #0a0e14;
+      color: #c9d1d9;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #header {
+      background: #161b22;
+      border-bottom: 1px solid #21262d;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    #header h1 {
+      font-size: 14px;
+      color: #58a6ff;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    #status-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #3fb950;
+      box-shadow: 0 0 8px #3fb950;
+      display: inline-block;
+      margin-right: 6px;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    #map {
+      flex: 1;
+      z-index: 1;
+    }
+
+    #panel {
+      background: #161b22;
+      border-top: 1px solid #21262d;
+      padding: 10px 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .stat {
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 8px 12px;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+
+    .stat-value {
+      font-size: 13px;
+      color: #e6edf3;
+      word-break: break-all;
+    }
+
+    .safe    { color: #3fb950; }
+    .unsafe  { color: #f85149; }
+    .pending { color: #d29922; }
+
+    #loyalty-bar-wrap {
+      height: 4px;
+      background: #21262d;
+      border-radius: 2px;
+      margin-top: 6px;
+    }
+
+    #loyalty-bar {
+      height: 100%;
+      background: #3fb950;
+      border-radius: 2px;
+      transition: width 0.5s ease;
+      width: 100%;
+    }
+
+    #log {
+      max-height: 90px;
+      overflow-y: auto;
+      font-size: 11px;
+      color: #8b949e;
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 6px 10px;
+      grid-column: 1 / -1;
+    }
+
+    #log p { margin: 1px 0; }
+    #log .ev-verify { color: #f85149; }
+    #log .ev-safe   { color: #3fb950; }
+    #log .ev-info   { color: #8b949e; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>⬡ NSIGII GPS Relay — OBINexus Computing</h1>
+  <span><span id="status-dot"></span><span id="status-text">Connecting…</span></span>
+</div>
+
+<div id="map"></div>
+
+<div id="panel">
+  <div class="stat">
+    <div class="stat-label">Latitude</div>
+    <div class="stat-value" id="val-lat">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Longitude</div>
+    <div class="stat-value" id="val-lon">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Source</div>
+    <div class="stat-value" id="val-source">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Accuracy</div>
+    <div class="stat-value" id="val-acc">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">R(t) Radial Drift</div>
+    <div class="stat-value" id="val-drift">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">L(t) Loyalty</div>
+    <div class="stat-value" id="val-loyalty">—</div>
+    <div id="loyalty-bar-wrap"><div id="loyalty-bar"></div></div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">NSIGII VERIFY</div>
+    <div class="stat-value" id="val-safe">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Sequence</div>
+    <div class="stat-value" id="val-seq">—</div>
+  </div>
+  <div id="log"><p class="ev-info">— waiting for first fix —</p></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ── Map setup ─────────────────────────────────────────────────────────────────
+const map = L.map('map', { zoomControl: true }).setView([0, 0], 2);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a>',
+  maxZoom: 19,
+}).addTo(map);
+
+// Markers
+const browserIcon = L.divIcon({
+  className: '',
+  html: `<div style="width:16px;height:16px;background:#58a6ff;border-radius:50%;border:3px solid #fff;box-shadow:0 0 10px #58a6ff88;"></div>`,
+  iconSize: [16, 16], iconAnchor: [8, 8],
+});
+
+const serverIcon = L.divIcon({
+  className: '',
+  html: `<div style="width:14px;height:14px;background:#3fb950;border-radius:50%;border:2px solid #fff;box-shadow:0 0 8px #3fb95088;opacity:0.85;"></div>`,
+  iconSize: [14, 14], iconAnchor: [7, 7],
+});
+
+let browserMarker = null;
+let serverMarker  = null;
+let canonicalCircle = null;
+let hasInitialView  = false;
+
+function setView(lat, lon) {
+  if (!hasInitialView) {
+    map.setView([lat, lon], 13);
+    hasInitialView = true;
+  }
+}
+
+// ── Logging ──────────────────────────────────────────────────────────────────
+const logEl = document.getElementById('log');
+function addLog(msg, cls = 'ev-info') {
+  const p = document.createElement('p');
+  p.className = cls;
+  p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.insertBefore(p, logEl.firstChild);
+  if (logEl.children.length > 50) logEl.removeChild(logEl.lastChild);
+}
+
+// ── UI update ─────────────────────────────────────────────────────────────────
+function updatePanel(loc, sourceLabel) {
+  document.getElementById('val-lat').textContent    = loc.lat.toFixed(6);
+  document.getElementById('val-lon').textContent    = loc.lon.toFixed(6);
+  document.getElementById('val-source').textContent = loc.source || sourceLabel || '—';
+  document.getElementById('val-acc').textContent    = loc.accuracy_m != null
+    ? (loc.accuracy_m < 1000 ? loc.accuracy_m.toFixed(0) + ' m' : (loc.accuracy_m/1000).toFixed(1) + ' km')
+    : '—';
+
+  const drift = loc.radial_drift_m;
+  document.getElementById('val-drift').textContent = drift != null
+    ? (drift < 1000 ? drift.toFixed(0) + ' m' : (drift/1000).toFixed(2) + ' km') : '—';
+
+  const loyalty = loc.loyalty;
+  const loyaltyEl = document.getElementById('val-loyalty');
+  const barEl     = document.getElementById('loyalty-bar');
+  if (loyalty != null) {
+    loyaltyEl.textContent  = loyalty.toFixed(4);
+    loyaltyEl.className    = 'stat-value ' + (loyalty > 0.8 ? 'safe' : loyalty > 0.5 ? 'pending' : 'unsafe');
+    barEl.style.width      = (loyalty * 100).toFixed(1) + '%';
+    barEl.style.background = loyalty > 0.8 ? '#3fb950' : loyalty > 0.5 ? '#d29922' : '#f85149';
+  }
+
+  const safeEl = document.getElementById('val-safe');
+  if (loc.safe != null) {
+    safeEl.textContent  = loc.safe ? 'SAFE' : '⚠ VERIFY INTERRUPT';
+    safeEl.className    = 'stat-value ' + (loc.safe ? 'safe' : 'unsafe');
+  }
+
+  if (loc.seq != null) {
+    document.getElementById('val-seq').textContent = loc.seq;
+  }
+}
+
+// ── Browser geolocation (primary — high accuracy) ────────────────────────────
+function startBrowserGPS() {
+  if (!navigator.geolocation) {
+    addLog('Browser geolocation not available — using server IP fix', 'ev-info');
+    return;
+  }
+  addLog('Browser geolocation active (high accuracy)', 'ev-safe');
+
+  navigator.geolocation.watchPosition(
+    pos => {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      const acc = pos.coords.accuracy;
+
+      setView(lat, lon);
+
+      if (!browserMarker) {
+        browserMarker = L.marker([lat, lon], { icon: browserIcon })
+          .bindPopup('<b>Your Device (Browser GPS)</b><br>High accuracy')
+          .addTo(map);
+      } else {
+        browserMarker.setLatLng([lat, lon]);
+      }
+
+      const loc = {
+        lat: lat, lon: lon,
+        accuracy_m: acc,
+        source: 'browser GPS',
+        radial_drift_m: null,
+        loyalty: null,
+        safe: null,
+        seq: null,
+      };
+      updatePanel(loc, 'browser GPS');
+      document.getElementById('status-text').textContent = 'Browser GPS active';
+      addLog(`Browser fix: ${lat.toFixed(5)}, ${lon.toFixed(5)} ±${acc.toFixed(0)}m`, 'ev-safe');
+    },
+    err => {
+      addLog(`Browser GPS error: ${err.message}`, 'ev-info');
+    },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+  );
+}
+
+// ── Server SSE (secondary — IP-based, carries drift data) ────────────────────
+function startServerSSE() {
+  if (!window.EventSource) {
+    addLog('SSE not supported — falling back to polling', 'ev-info');
+    startPolling();
+    return;
+  }
+
+  const es = new EventSource('/events');
+
+  es.onopen = () => {
+    addLog('Server SSE stream connected', 'ev-info');
+    document.getElementById('status-text').textContent = 'SSE connected';
+  };
+
+  es.onmessage = ev => {
+    try {
+      const loc = JSON.parse(ev.data);
+      onServerLocation(loc);
+    } catch (e) {
+      addLog('SSE parse error: ' + e.message, 'ev-info');
+    }
+  };
+
+  es.onerror = () => {
+    addLog('SSE disconnected — retrying…', 'ev-info');
+    document.getElementById('status-text').textContent = 'SSE reconnecting…';
+  };
+}
+
+function onServerLocation(loc) {
+  if (!loc.lat || !loc.lon) return;
+
+  setView(loc.lat, loc.lon);
+
+  if (!serverMarker) {
+    serverMarker = L.marker([loc.lat, loc.lon], { icon: serverIcon })
+      .bindPopup(`<b>Server IP Fix</b><br>${loc.source || 'ip-api'}`)
+      .addTo(map);
+
+    // Draw canonical anchor circle (50 km threshold)
+    canonicalCircle = L.circle([loc.lat, loc.lon], {
+      radius: 50000,
+      color: '#58a6ff',
+      fillColor: '#58a6ff',
+      fillOpacity: 0.04,
+      weight: 1,
+      dashArray: '4 4',
+    }).bindTooltip('Canonical anchor radius (50 km — NSIGII threshold)').addTo(map);
+  } else {
+    serverMarker.setLatLng([loc.lat, loc.lon]);
+    serverMarker.setPopupContent(`<b>Server IP Fix</b><br>${loc.source || 'ip-api'}<br>R(t): ${
+      loc.radial_drift_m != null ? (loc.radial_drift_m/1000).toFixed(2) + ' km' : '—'}`);
+  }
+
+  // Update panel with drift data (only server side has it)
+  updatePanel(loc, 'server ip');
+
+  const cls = loc.safe === false ? 'ev-verify' : 'ev-safe';
+  const msg = loc.safe === false
+    ? `⚠ VERIFY — R=${(loc.radial_drift_m/1000).toFixed(2)}km L=${loc.loyalty?.toFixed(3)} SEQ:${loc.seq}`
+    : `Server fix SEQ:${loc.seq} ${loc.lat.toFixed(5)},${loc.lon.toFixed(5)} L=${loc.loyalty?.toFixed(3)}`;
+  addLog(msg, cls);
+}
+
+// Fallback polling if SSE unavailable
+function startPolling() {
+  setInterval(() => {
+    fetch('/api/location')
+      .then(r => r.json())
+      .then(onServerLocation)
+      .catch(() => {});
+  }, 5000);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+addLog('NSIGII GPS Relay initialising…', 'ev-info');
+startBrowserGPS();
+startServerSSE();
+</script>
+</body>
+</html>
