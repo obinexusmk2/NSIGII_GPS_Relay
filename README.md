@@ -7,6 +7,13 @@
 
 ## What is ltcodec?
 
+# 2. Build
+go build .
+
+# 3. Run
+.\nsigii_gps_relay.exe serve
+
+
 `ltcodec` is the **space-time identity layer** of the OBINexus toolchain. It anchors every payload to a non-reproducible fingerprint made of three things:
 
 | Layer | What | Package |
